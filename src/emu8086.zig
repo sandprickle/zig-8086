@@ -21,12 +21,12 @@ const EAC = [8][]const u8{
 
 pub const DisassemblyError = error{ MissingBytes, UnknownOpcode };
 
-pub fn disassembleBytes(allocator: Allocator, bytes: []u8, output: std.ArrayList(u8).Writer) !void {
+pub fn disassembleBytes(allocator: Allocator, bytes: []u8, output: std.fs.File.Writer) !void {
     _ = try output.write("bits 16\n\n");
 
     var iter = ByteIter.fromSlice(bytes);
     while (iter.len() > 0) {
-        var start = try iter.next();
+        const start = try iter.next();
 
         if (start & 0b11110000 == 0b10110000) {
             // this is an immediate
@@ -94,7 +94,7 @@ fn movRMReg(allocator: Allocator, bytes: *ByteIter, opDirWord: OpDirWord) ![]u8 
                 try std.fmt.allocPrint(allocator, BRACES_FMT, .{eacStr})
             else
                 try std.fmt
-                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, std.math.absCast(disp8) });
+                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, @abs(disp8) });
 
             return if (opDirWord.dir == 0)
                 // REG is source
@@ -119,7 +119,7 @@ fn movRMReg(allocator: Allocator, bytes: *ByteIter, opDirWord: OpDirWord) ![]u8 
                 try std.fmt.allocPrint(allocator, BRACES_FMT, .{eacStr})
             else
                 try std.fmt
-                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, std.math.absCast(disp16) });
+                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, @abs(disp16) });
 
             return if (opDirWord.dir == 0)
                 // REG is source

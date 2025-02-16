@@ -16,14 +16,12 @@ pub fn main() !void {
     } else {
         const path = args[1];
 
-        var output = std.ArrayList(u8).init(allocator);
-        defer output.deinit();
-        const outWriter = output.writer();
+        const outputWriter = stdout.writer();
 
         var splitPath = std.mem.splitBackwardsSequence(u8, path, "/");
         const filename = splitPath.first();
         if (filename.len > 0) {
-            _ = try outWriter.write(try std.fmt.allocPrint(allocator, "; Disassembly of {s}\n\n", .{filename}));
+            _ = try stdout.write(try std.fmt.allocPrint(allocator, "; Disassembly of {s}\n\n", .{filename}));
         }
 
         const bytes = std.fs.cwd()
@@ -32,11 +30,11 @@ pub fn main() !void {
             return;
         };
 
-        emu8086.disassembleBytes(allocator, bytes, outWriter) catch |err| {
-            std.debug.print("Unable to disassemble file: {}\n", .{err});
+        emu8086.disassembleBytes(allocator, bytes, outputWriter) catch |err| {
+            
+            
+            std.debug.print("Unable to proceed with disassembly: {}\n", .{err});
             return;
         };
-
-        _ = try stdout.write(output.items);
     }
 }
