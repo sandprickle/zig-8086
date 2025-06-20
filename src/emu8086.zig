@@ -3,6 +3,17 @@ const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
 const assert = std.debug.assert;
 
+const OpCodes = enum(u6) {
+    // Data Transfer
+    mov = 0b100010,
+    reg_mem_mov = 0b100010,
+    // Arithmetic
+    reg_mem_add = 0b000000, // 000
+    reg_mem_sub = 0b001010, // 101
+    reg_mem_cmp = 0b001110, // 111
+    arith_immed = 0b100000, // Covers ADD, SUB, CMP
+};
+
 const REGISTERS = [2][8][]const u8{
     [8][]const u8{ "al", "cl", "dl", "bl", "ah", "ch", "dh", "dh" },
     [8][]const u8{ "ax", "cx", "dx", "bx", "sp", "bp", "si", "di" },
@@ -19,9 +30,17 @@ const EAC = [8][]const u8{
     "bx",
 };
 
+const INST_FMT = "{s} {s}, {s}\n";
+const EAC_FMT = "[{s} {s} {d}]";
+const BRACES_FMT = "[{s}]";
+
 pub const DisassemblyError = error{ MissingBytes, UnknownOpcode };
 
-pub fn disassembleBytes(allocator: Allocator, bytes: []u8, output: std.fs.File.Writer) !void {
+pub fn disassembleBytes(
+    allocator: Allocator,
+    bytes: []u8,
+    output: std.fs.File.Writer,
+) !void {
     _ = try output.write("bits 16\n\n");
 
     var iter = ByteIter.fromSlice(bytes);
@@ -29,16 +48,24 @@ pub fn disassembleBytes(allocator: Allocator, bytes: []u8, output: std.fs.File.W
         const start = try iter.next();
 
         if (start & 0b11110000 == 0b10110000) {
-            // this is an immediate
-            const imWordReg: ImWordReg = @bitCast(start);
-            _ = try output.write(try movImToReg(allocator, &iter, imWordReg));
+            // this is an immediate to register
+            const imm_word_reg: ImWordReg = @bitCast(start);
+            _ = try output.write(try movImmediateToReg(
+                allocator,
+                &iter,
+                imm_word_reg,
+            ));
         } else {
             // this is a normal instruction
-            const opDirWord: OpDirWord = @bitCast(start);
+            const op_dir_word: OpDirectionWord = @bitCast(start);
 
-            switch (opDirWord.op) {
-                0b100010 => {
-                    _ = try output.write(try movRMReg(allocator, &iter, opDirWord));
+            switch (op_dir_word.op) {
+                OpCodes.reg_mem_mov => {
+                    _ = try output.write(try movRMReg(
+                        allocator,
+                        &iter,
+                        op_dir_word,
+                    ));
                 },
                 else => return DisassemblyError.UnknownOpcode,
             }
@@ -47,34 +74,37 @@ pub fn disassembleBytes(allocator: Allocator, bytes: []u8, output: std.fs.File.W
 }
 
 /// Special case for opcode 1011.
-fn movImToReg(allocator: Allocator, bytes: *ByteIter, imWordReg: ImWordReg) ![]u8 {
-    const register = REGISTERS[imWordReg.word][imWordReg.reg];
+fn movImmediateToReg(allocator: Allocator, bytes: *ByteIter, im_word_reg: ImWordReg) ![]u8 {
+    const register = REGISTERS[im_word_reg.word][im_word_reg.reg];
     const format = "mov {s}, {d}\n";
 
-    if (imWordReg.word == 0) {
-        const data8: i8 = @bitCast(try bytes.next());
-        return std.fmt.allocPrint(allocator, format, .{ register, data8 });
+    if (im_word_reg.word == 0) {
+        const data_8: i8 = @bitCast(try bytes.next());
+        return std.fmt.allocPrint(allocator, format, .{ register, data_8 });
     } else {
-        const dataLo = try bytes.next();
-        const dataHi = @as(u16, try bytes.next());
-        const data16: i16 = @bitCast((dataLo | (dataHi << 8)));
-        return std.fmt.allocPrint(allocator, format, .{ register, data16 });
+        const data_lo = try bytes.next();
+        const data_hi = @as(u16, try bytes.next());
+        const data_16: i16 = @bitCast((data_lo | (data_hi << 8)));
+        return std.fmt.allocPrint(allocator, format, .{ register, data_16 });
     }
 }
 
-fn movRMReg(allocator: Allocator, bytes: *ByteIter, opDirWord: OpDirWord) ![]u8 {
-    const modRegRM: ModRegRM = @bitCast(try bytes.next());
+/// MOV Register/Memory to/from register
+fn movRMReg(allocator: Allocator, bytes: *ByteIter, op_dir_word: OpDirectionWord) ![]u8 {
+    const mod_reg_rm: ModRegRM = @bitCast(try bytes.next());
     const MOV_FMT = "mov {s}, {s}\n";
-    const EAC_FMT = "[{s} {s} {d}]";
-    const BRACES_FMT = "[{s}]";
 
-    switch (modRegRM.mod) {
+    switch (mod_reg_rm.mod) {
         0b00 => {
             // Mem 0-bit displacement
-            const eac = try std.fmt.allocPrint(allocator, BRACES_FMT, .{EAC[modRegRM.rm]});
-            const register = REGISTERS[opDirWord.word][modRegRM.reg];
+            const eac = try std.fmt.allocPrint(
+                allocator,
+                BRACES_FMT,
+                .{EAC[mod_reg_rm.rm]},
+            );
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
 
-            return if (opDirWord.dir == 0)
+            return if (op_dir_word.dir == 0)
                 // REG is source
                 std.fmt.allocPrint(allocator, MOV_FMT, .{ eac, register })
             else
@@ -83,45 +113,44 @@ fn movRMReg(allocator: Allocator, bytes: *ByteIter, opDirWord: OpDirWord) ![]u8 
         },
         0b01 => {
             // Mem 8-bit displacement
-            const register = REGISTERS[opDirWord.word][modRegRM.reg];
-            const eacStr = EAC[modRegRM.rm];
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
+            const eacStr = EAC[mod_reg_rm.rm];
 
-            const disp8: i8 = @bitCast(try bytes.next());
+            const disp_8: i8 = @bitCast(try bytes.next());
 
-            const operator = if (disp8 >= 0) "+" else "-";
+            const operator = if (disp_8 >= 0) "+" else "-";
 
-            const eac = if (disp8 == 0)
+            const eac = if (disp_8 == 0)
                 try std.fmt.allocPrint(allocator, BRACES_FMT, .{eacStr})
             else
                 try std.fmt
-                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, @abs(disp8) });
+                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, @abs(disp_8) });
 
-            return if (opDirWord.dir == 0)
+            return if (op_dir_word.dir == 0)
                 // REG is source
                 std.fmt.allocPrint(allocator, MOV_FMT, .{ eac, register })
             else
                 // REG is destination
                 std.fmt.allocPrint(allocator, MOV_FMT, .{ register, eac });
         },
-
         0b10 => {
             // Mem 16-bit displacement
-            const register = REGISTERS[opDirWord.word][modRegRM.reg];
-            const eacStr = EAC[modRegRM.rm];
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
+            const eac_str = EAC[mod_reg_rm.rm];
 
-            const dispLo = try bytes.next();
-            const dispHi = @as(u16, try bytes.next());
-            const disp16: i16 = @bitCast(dispLo | (dispHi << 8));
+            const disp_lo = try bytes.next();
+            const disp_hi = @as(u16, try bytes.next());
+            const disp_16: i16 = @bitCast(disp_lo | (disp_hi << 8));
 
-            const operator = if (disp16 >= 0) "+" else "-";
+            const operator = if (disp_16 >= 0) "+" else "-";
 
-            const eac = if (disp16 == 0)
-                try std.fmt.allocPrint(allocator, BRACES_FMT, .{eacStr})
+            const eac = if (disp_16 == 0)
+                try std.fmt.allocPrint(allocator, BRACES_FMT, .{eac_str})
             else
                 try std.fmt
-                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, @abs(disp16) });
+                    .allocPrint(allocator, EAC_FMT, .{ eac_str, operator, @abs(disp_16) });
 
-            return if (opDirWord.dir == 0)
+            return if (op_dir_word.dir == 0)
                 // REG is source
                 std.fmt.allocPrint(allocator, MOV_FMT, .{ eac, register })
             else
@@ -131,10 +160,10 @@ fn movRMReg(allocator: Allocator, bytes: *ByteIter, opDirWord: OpDirWord) ![]u8 
         0b11 => {
             // Register
 
-            const register = REGISTERS[opDirWord.word][modRegRM.reg];
-            const r_m = REGISTERS[opDirWord.word][modRegRM.rm];
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
+            const r_m = REGISTERS[op_dir_word.word][mod_reg_rm.rm];
 
-            return if (opDirWord.dir == 0)
+            return if (op_dir_word.dir == 0)
                 // REG is source
                 std.fmt.allocPrint(allocator, MOV_FMT, .{ r_m, register })
             else
@@ -142,25 +171,156 @@ fn movRMReg(allocator: Allocator, bytes: *ByteIter, opDirWord: OpDirWord) ![]u8 
                 std.fmt.allocPrint(allocator, MOV_FMT, .{ register, r_m });
         },
     }
-
-    return error.Help;
 }
+
+/// Todo: This should work for MOVs too
+fn arithmeticRegMem(
+    allocator: Allocator,
+    bytes: *ByteIter,
+    op_dir_word: OpDirectionWord,
+) ![]u8 {
+    const instruction = switch (op_dir_word) {
+        OpCodes.reg_mem_add => "add",
+        OpCodes.reg_mem_sub => "sub",
+        OpCodes.reg_mem_cmp => "cmp",
+    };
+
+    const mod_reg_rm: ModRegRM = @bitCast(try bytes.next());
+
+    switch (mod_reg_rm.mod) {
+        0b00 => {
+            // Memory no displacement
+            const eac = try std.fmt.allocPrint(
+                allocator,
+                BRACES_FMT,
+                .{EAC[mod_reg_rm.rm]},
+            );
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
+
+            return if (op_dir_word.dir == 0)
+                // REG is source
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, eac, register },
+                )
+            else
+                // REG is destination
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, register, eac },
+                );
+        },
+        0b01 => {
+            // Mem 8-bit displacement
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
+            const eacStr = EAC[mod_reg_rm.rm];
+
+            const disp_8: i8 = @bitCast(try bytes.next());
+
+            const operator = if (disp_8 >= 0) "+" else "-";
+
+            const eac = if (disp_8 == 0)
+                try std.fmt.allocPrint(allocator, BRACES_FMT, .{eacStr})
+            else
+                try std.fmt
+                    .allocPrint(allocator, EAC_FMT, .{ eacStr, operator, @abs(disp_8) });
+
+            return if (op_dir_word.dir == 0)
+                // REG is source
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, eac, register },
+                )
+            else
+                // REG is destination
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, register, eac },
+                );
+        },
+        0b10 => {
+            // Mem 16-bit displacement
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
+            const eac_str = EAC[mod_reg_rm.rm];
+
+            const disp_lo = try bytes.next();
+            const disp_hi = @as(u16, try bytes.next());
+            const disp_16: i16 = @bitCast(disp_lo | (disp_hi << 8));
+
+            const operator = if (disp_16 >= 0) "+" else "-";
+
+            const eac = if (disp_16 == 0)
+                try std.fmt.allocPrint(allocator, BRACES_FMT, .{eac_str})
+            else
+                try std.fmt
+                    .allocPrint(allocator, EAC_FMT, .{ eac_str, operator, @abs(disp_16) });
+
+            return if (op_dir_word.dir == 0)
+                // REG is source
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, eac, register },
+                )
+            else
+                // REG is destination
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, register, eac },
+                );
+        },
+        0b11 => {
+            // Register
+            const register = REGISTERS[op_dir_word.word][mod_reg_rm.reg];
+            const r_m = REGISTERS[op_dir_word.word][mod_reg_rm.rm];
+
+            return if (op_dir_word.dir == 0)
+                // REG is source
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, r_m, register },
+                )
+            else
+                // REG is destination
+                std.fmt.allocPrint(
+                    allocator,
+                    INST_FMT,
+                    .{ instruction, register, r_m },
+                );
+        },
+    }
+}
+
+fn arithmeticImmediate(
+    allocator: Allocator,
+    bytes: *ByteIter,
+    op_dir_word: OpDirectionWord,
+) ![]u8 {}
 
 // Structs
 
 /// Typical first byte of an instruction, featuring a 6-bit opcode, direction bit, and word bit.
-const OpDirWord = packed struct {
+const OpDirectionWord = packed struct {
+    /// Word bit, 0 for byte, 1 for word.
     word: u1,
+    /// Direction bit, 0 for (REG is) source, 1 for destination.
     dir: u1,
+    /// Opcode, 6 bits.
     op: u6,
 
     comptime {
-        assert(@bitSizeOf(OpDirWord) == @bitSizeOf(u8));
+        assert(@bitSizeOf(OpDirectionWord) == @bitSizeOf(u8));
 
         const byte: u8 = 0b10001001;
-        const castByte: OpDirWord = @bitCast(byte);
+        const cast_byte: OpDirectionWord = @bitCast(byte);
         // assertion fails
-        assert(castByte.op == (byte & 0b11111100) >> 2);
+        assert(cast_byte.op == (byte & 0b11111100) >> 2);
     }
 };
 
@@ -173,7 +333,6 @@ const ImWordReg = packed struct {
 };
 
 /// Typical second byte of an instruction.
-/// The MOD field is 2 bits, the REG field is 3 bits, and the R/M field is 3 bits.
 const ModRegRM = packed struct {
     rm: u3,
     reg: u3,
@@ -210,16 +369,16 @@ const Full = packed struct {
     x: u8,
 };
 test "OpDirWord packed struct" {
-    try expect(@sizeOf(OpDirWord) == 1);
-    try expect(@bitSizeOf(OpDirWord) == 8);
-    try expect(@bitOffsetOf(OpDirWord, "op") == 0);
-    try expect(@bitOffsetOf(OpDirWord, "dir") == 6);
-    try expect(@bitOffsetOf(OpDirWord, "word") == 7);
+    try expect(@sizeOf(OpDirectionWord) == 1);
+    try expect(@bitSizeOf(OpDirectionWord) == 8);
+    try expect(@bitOffsetOf(OpDirectionWord, "op") == 0);
+    try expect(@bitOffsetOf(OpDirectionWord, "dir") == 6);
+    try expect(@bitOffsetOf(OpDirectionWord, "word") == 7);
 
     const byte: u8 = 0b10001001;
     const full = Full{ .x = byte };
 
-    const opDirWord: OpDirWord = @bitCast(full);
+    const op_dir_word: OpDirectionWord = @bitCast(full);
 
-    try expect(opDirWord.op == 0b100010);
+    try expect(op_dir_word.op == 0b100010);
 }
